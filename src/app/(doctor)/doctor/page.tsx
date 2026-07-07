@@ -6,8 +6,8 @@ import Dashboard from "./dashboard";
 // convenience redirect — real enforcement is the API guard on /api/doctor/*.
 export default async function DoctorPage() {
   try {
-    await requireUser(["doctor"]);
-    return <Dashboard />;
+    const caller = await requireUser(["doctor"]);
+    return <Dashboard doctorName={caller.name} />;
   } catch {
     redirect("/login");
   }
