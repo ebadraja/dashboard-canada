@@ -1,13 +1,18 @@
-// Minimal landing. Foundation (Doc 0) and the VA view (Doc 1) are built;
-// Doctor (Doc 2) and Operator (Doc 3) views are next.
-export default function Home() {
-  return (
-    <main>
-      <h1>AI Receptionist</h1>
-      <p>
-        <a href="/login">Log in</a> · VAs: <a href="/va">open the rail</a> ·
-        Health: <a href="/api/health">/api/health</a>
-      </p>
-    </main>
+import { redirect } from "next/navigation";
+import { auth } from "@/server/auth";
+import { prisma } from "@/server/db";
+
+// Role-based landing (DESIGN.md §5.0/§5.5): everyone goes straight to their
+// own screen; logged-out visitors go to login.
+export default async function Home() {
+  const session = await auth();
+  const uid = session?.user?.id;
+  if (!uid) redirect("/login");
+
+  const user = await prisma.user.findUnique({ where: { id: uid } });
+  if (!user || !user.active) redirect("/login");
+
+  redirect(
+    user.role === "va" ? "/va" : user.role === "doctor" ? "/doctor" : "/operator",
   );
 }

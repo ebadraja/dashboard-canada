@@ -1,9 +1,10 @@
 import { AuthError } from "next-auth";
 import { redirect } from "next/navigation";
+import { Activity } from "lucide-react";
 import { signIn } from "@/server/auth";
+import { LoginForm } from "./login-form";
 
-// Minimal login page — the Foundation only needs "a person can log in and is
-// recognised by role" (Doc 0 DoD). Real role-specific screens come in Docs 1-3.
+// Login (DESIGN.md §5.1): centered card, inline error, calm type.
 export default async function LoginPage({
   searchParams,
 }: {
@@ -17,46 +18,40 @@ export default async function LoginPage({
       await signIn("credentials", {
         email: formData.get("email"),
         password: formData.get("password"),
-        redirectTo: "/",
+        redirectTo: "/", // home routes by role
       });
     } catch (e) {
-      // signIn throws a redirect on success; rethrow everything that is not
-      // a credentials failure.
-      if (e instanceof AuthError) {
-        redirect("/login?error=1");
-      }
+      if (e instanceof AuthError) redirect("/login?error=1");
       throw e;
     }
   }
 
   return (
-    <main>
-      <h1>Log in</h1>
-      {error && <p style={{ color: "crimson" }}>Wrong email or password.</p>}
-      <form
-        action={login}
-        style={{ display: "grid", gap: "0.75rem", justifyItems: "stretch" }}
-      >
-        <input
-          name="email"
-          type="email"
-          placeholder="Email"
-          required
-          autoComplete="email"
-          style={{ padding: "0.6rem", fontSize: "1rem" }}
-        />
-        <input
-          name="password"
-          type="password"
-          placeholder="Password"
-          required
-          autoComplete="current-password"
-          style={{ padding: "0.6rem", fontSize: "1rem" }}
-        />
-        <button type="submit" style={{ padding: "0.6rem", fontSize: "1rem" }}>
-          Log in
-        </button>
-      </form>
+    <main
+      className="min-h-screen grid place-items-center p-4
+        bg-[radial-gradient(1200px_600px_at_50%_-10%,var(--accent-soft),var(--bg))]"
+    >
+      <div className="w-full max-w-[380px] animate-[fade-up_0.32s_cubic-bezier(0.2,0,0,1)]">
+        <style>{`@keyframes fade-up { from { opacity: 0; transform: translateY(8px); } }`}</style>
+        <div className="flex items-center justify-center gap-2 mb-5">
+          <span className="grid place-items-center size-9 rounded-xl bg-accent text-on-accent">
+            <Activity className="size-5" aria-hidden />
+          </span>
+          <span className="text-h2 font-semibold">AI Receptionist</span>
+        </div>
+
+        <div className="bg-surface border border-line rounded-xl shadow-sm p-6">
+          <h1 className="text-h3 font-semibold mb-1">Sign in</h1>
+          <p className="text-body-sm text-ink-3 mb-5">
+            Use the credentials your operator gave you.
+          </p>
+          <LoginForm action={login} failed={!!error} />
+        </div>
+
+        <p className="text-center text-caption text-ink-3 mt-4">
+          Access is provisioned by your operator.
+        </p>
+      </div>
     </main>
   );
 }

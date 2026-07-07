@@ -1,31 +1,152 @@
+@import "tailwindcss";
+
+/* Dark mode is a class on <html>, toggled by ThemeToggle (see DESIGN.md §3). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+   Design tokens (DESIGN.md §3) — the single source of truth.
+   Light theme on :root, dark theme on .dark. Tailwind maps them below.
+--------------------------------------------------------------------------- */
 :root {
-  color-scheme: light dark;
-  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --bg: #f8f9fb;          /* page */
+  --surface: #ffffff;     /* cards */
+  --surface-2: #f1f3f7;   /* inset areas */
+  --line: #e4e7ee;        /* hairline borders */
+  --ink: #171c26;         /* primary text */
+  --ink-2: #4b5566;       /* secondary text */
+  --ink-3: #8a92a6;       /* muted text */
+  --accent: #2a78d6;      /* the one accent (validated) */
+  --accent-soft: #e8f1fc;
+  --on-accent: #ffffff;
+  --success: #148457;
+  --success-soft: #e3f5ee;
+  --warning: #9a6700;
+  --warning-soft: #fdf3d8;
+  --danger: #c93634;
+  --danger-soft: #fdebea;
+  --violet: #6d5bd0;
+  --violet-soft: #efecfb;
+}
+.dark {
+  --bg: #0f1420;
+  --surface: #171d2b;
+  --surface-2: #1f2637;
+  --line: #2a3345;
+  --ink: #e9edf4;
+  --ink-2: #a8b1c2;
+  --ink-3: #6d7789;
+  --accent: #3987e5;
+  --accent-soft: #1a2c47;
+  --on-accent: #ffffff;
+  --success: #2bbd85;
+  --success-soft: #14301f;
+  --warning: #e5a93d;
+  --warning-soft: #33270f;
+  --danger: #e66767;
+  --danger-soft: #3a1a1c;
+  --violet: #9085e9;
+  --violet-soft: #262143;
 }
 
-* {
-  box-sizing: border-box;
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-violet: var(--violet);
+  --color-violet-soft: var(--violet-soft);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+
+  /* Type scale (DESIGN.md §3.1) — hierarchy by size + ink, weights ≤ 600. */
+  --text-caption: 0.75rem;   /* 12 */
+  --text-body-sm: 0.8125rem; /* 13 */
+  --text-body: 0.875rem;     /* 14 — base */
+  --text-h3: 1rem;           /* 16 */
+  --text-h2: 1.125rem;       /* 18 */
+  --text-h1: 1.375rem;       /* 22 */
+  --text-display: 1.75rem;   /* 28 — stat tiles only */
+
+  --radius-lg: 8px;   /* inputs, buttons */
+  --radius-xl: 12px;  /* cards */
+
+  --shadow-sm: 0 1px 2px rgb(15 20 32 / 0.06), 0 1px 3px rgb(15 20 32 / 0.08);
+  --shadow-lg: 0 8px 30px rgb(15 20 32 / 0.22);
+
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 }
 
+/* ---------------------------------------------------------------------------
+   Base
+--------------------------------------------------------------------------- */
+html {
+  color-scheme: light;
+}
+html.dark {
+  color-scheme: dark;
+}
 body {
-  margin: 0;
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
+  @apply bg-bg text-ink font-sans text-body antialiased;
 }
 
-main {
-  text-align: center;
-  padding: 2rem;
-  max-width: 40rem;
+/* Numbers that line up: metrics, money, timers. */
+.tnum {
+  font-variant-numeric: tabular-nums;
 }
 
-main h1 {
-  font-size: 1.5rem;
-  margin-bottom: 0.5rem;
+/* Tiny tracked overline label — the only sanctioned uppercase. */
+.overline {
+  @apply text-[11px] font-medium tracking-[0.08em] uppercase text-ink-3;
 }
 
-main p {
-  opacity: 0.7;
-  line-height: 1.5;
+/* Visible focus for keyboard users; invisible for mouse. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Skeleton shimmer (DESIGN.md §4). */
+.skeleton {
+  @apply bg-surface-2 rounded-lg relative overflow-hidden;
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.08), transparent);
+  animation: shimmer 1.6s infinite;
+}
+@keyframes shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+/* Urgent-card pulse (the one sanctioned loop besides shimmer). */
+@keyframes pulse-ring {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(233 103 103 / 0.35); }
+  50% { box-shadow: 0 0 0 4px rgb(233 103 103 / 0); }
+}
+.pulse-urgent {
+  animation: pulse-ring 1.6s var(--ease-standard) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

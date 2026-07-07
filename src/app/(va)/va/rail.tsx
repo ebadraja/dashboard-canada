@@ -1,10 +1,27 @@
 "use client";
 
-// The rail (Doc 1): a kitchen display, not an office form.
-// Loud alert, big buttons, zero typing. The VA only taps real things
-// (Golden Rule 1) — every button here was drawn from server truth.
+// The rail (Doc 1, redesigned per DESIGN.md §5.2): a calm kitchen display.
+// Loud where it matters (new-card ding, big CONFIRM tap targets), quiet
+// everywhere else. The VA only taps real things (Golden Rule 1).
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
+import {
+  BellRing,
+  CalendarCheck2,
+  CalendarX2,
+  ArrowLeftRight,
+  Search,
+  Clock3,
+  PhoneCall,
+  Volume2,
+  Inbox,
+} from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { AppShell } from "@/components/ui/app-shell";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty-state";
+import { useToast } from "@/components/ui/toast";
 
 type TaskCard = {
   id: string;
@@ -43,37 +60,73 @@ async function api(path: string, init?: RequestInit) {
   return data;
 }
 
-// ---------------------------------------------------------------------------
+// Type → visual identity (edge color, icon, label).
+const TYPE_META: Record<
+  TaskCard["type"],
+  { edge: string; icon: ReactNode; label: string }
+> = {
+  book: { edge: "bg-accent", icon: <CalendarCheck2 className="size-4" />, label: "Booking" },
+  cancel: { edge: "bg-danger", icon: <CalendarX2 className="size-4" />, label: "Cancellation" },
+  move: { edge: "bg-violet", icon: <ArrowLeftRight className="size-4" />, label: "Reschedule" },
+  find: { edge: "bg-accent", icon: <Search className="size-4" />, label: "Find patient" },
+  availability: { edge: "bg-ink-3", icon: <Clock3 className="size-4" />, label: "Availability" },
+  callback: { edge: "bg-warning", icon: <PhoneCall className="size-4" />, label: "Callback" },
+};
 
 export default function Rail({ vaName }: { vaName: string }) {
+  const toast = useToast();
   const [tasks, setTasks] = useState<TaskCard[]>([]);
   const [status, setStatus] = useState({ available: true, waiting: 0 });
+  const [connected, setConnected] = useState(false);
+  const [soundOn, setSoundOn] = useState(false);
   const [boardDate, setBoardDate] = useState(today());
   const [board, setBoard] = useState<{ loaded: boolean; slots: BoardSlot[] } | null>(null);
   const [boardPick, setBoardPick] = useState<Set<string>>(new Set());
-  const [flash, setFlash] = useState<string | null>(null);
-  const [, setTick] = useState(0); // re-render for the age timers
+  const [savingBoard, setSavingBoard] = useState(false);
+  const [, setTick] = useState(0);
   const audioRef = useRef<AudioContext | null>(null);
 
-  // --- the ding -----------------------------------------------------------
+  // --- sound (needs one user gesture — DESIGN.md §5.0) ----------------------
   const ding = useCallback(() => {
+    const ctx = audioRef.current;
+    if (!ctx) return;
     try {
-      audioRef.current ??= new AudioContext();
-      const ctx = audioRef.current;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.connect(gain).connect(ctx.destination);
       osc.frequency.value = 880;
-      gain.gain.setValueAtTime(0.4, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+      gain.gain.setValueAtTime(0.35, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
       osc.start();
-      osc.stop(ctx.currentTime + 0.6);
+      osc.stop(ctx.currentTime + 0.5);
+    } catch {}
+  }, []);
+
+  const enableSound = useCallback(() => {
+    try {
+      audioRef.current ??= new AudioContext();
+      audioRef.current.resume();
+      setSoundOn(true);
+      localStorage.setItem("railSound", "1");
+      // Confirmation blip so the VA knows it worked.
+      setTimeout(ding, 50);
     } catch {
-      /* no audio permission — the card still appears */
+      toast("error", "This browser blocked audio.");
+    }
+  }, [ding, toast]);
+
+  useEffect(() => {
+    // Re-arm silently on revisit if previously enabled (still needs a gesture
+    // in some browsers; the chip stays until the context actually runs).
+    if (localStorage.getItem("railSound") === "1") {
+      try {
+        audioRef.current ??= new AudioContext();
+        if (audioRef.current.state === "running") setSoundOn(true);
+      } catch {}
     }
   }, []);
 
-  // --- data loading -------------------------------------------------------
+  // --- data ------------------------------------------------------------------
   const refreshTasks = useCallback(async () => {
     setTasks((await api("/api/rail/tasks")) as TaskCard[]);
   }, []);
@@ -98,9 +151,11 @@ export default function Rail({ vaName }: { vaName: string }) {
     refreshBoard(boardDate).catch(() => {});
   }, [boardDate, refreshBoard]);
 
-  // --- live stream (SSE) ----------------------------------------------------
+  // --- live stream -------------------------------------------------------------
   useEffect(() => {
     const es = new EventSource("/api/rail/stream");
+    es.onopen = () => setConnected(true);
+    es.onerror = () => setConnected(false);
     es.addEventListener("task.created", (e) => {
       const t = JSON.parse((e as MessageEvent).data) as TaskCard;
       setTasks((prev) => (prev.some((x) => x.id === t.id) ? prev : [...prev, t]));
@@ -126,239 +181,323 @@ export default function Rail({ vaName }: { vaName: string }) {
     return () => es.close();
   }, [ding, refreshBoard, refreshStatus]);
 
-  // age timers tick once a second
   useEffect(() => {
     const t = setInterval(() => setTick((n) => n + 1), 1000);
     return () => clearInterval(t);
   }, []);
 
-  // --- actions --------------------------------------------------------------
+  // --- actions ------------------------------------------------------------------
   const act = useCallback(
-    async (fn: () => Promise<unknown>) => {
+    async (fn: () => Promise<unknown>, okMsg?: string) => {
       try {
         await fn();
-        setFlash(null);
+        if (okMsg) toast("success", okMsg);
       } catch (e) {
-        setFlash((e as Error).message);
+        toast("error", (e as Error).message);
       }
       refreshTasks().catch(() => {});
       refreshStatus().catch(() => {});
     },
-    [refreshTasks, refreshStatus],
+    [refreshTasks, refreshStatus, toast],
   );
 
-  const answer = (id: string, response: Record<string, unknown>) =>
-    act(() => api(`/api/rail/tasks/${id}/answer`, { method: "POST", body: JSON.stringify({ response }) }));
+  const answer = (id: string, response: Record<string, unknown>, okMsg?: string) =>
+    act(() => api(`/api/rail/tasks/${id}/answer`, { method: "POST", body: JSON.stringify({ response }) }), okMsg);
   const confirm = (id: string) =>
-    act(() => api(`/api/rail/tasks/${id}/confirm`, { method: "POST", body: "{}" }));
+    act(() => api(`/api/rail/tasks/${id}/confirm`, { method: "POST", body: "{}" }), "Confirmed.");
   const reopen = (id: string, close: boolean) =>
     act(() => api(`/api/rail/tasks/${id}/reopen`, { method: "POST", body: JSON.stringify({ close }) }));
 
   const toggleAvailable = () =>
-    act(async () => {
-      const next = !status.available;
-      await api("/api/rail/status", { method: "POST", body: JSON.stringify({ available: next }) });
-    });
-
-  const saveBoard = () =>
-    act(() =>
-      api("/api/rail/availability/load", {
-        method: "POST",
-        body: JSON.stringify({ date: boardDate, openTimes: [...boardPick] }),
-      }).then(() => refreshBoard(boardDate)),
+    act(async () =>
+      api("/api/rail/status", { method: "POST", body: JSON.stringify({ available: !status.available }) }),
     );
 
-  // --- render ---------------------------------------------------------------
+  const saveBoard = async () => {
+    setSavingBoard(true);
+    await act(
+      () =>
+        api("/api/rail/availability/load", {
+          method: "POST",
+          body: JSON.stringify({ date: boardDate, openTimes: [...boardPick] }),
+        }).then(() => refreshBoard(boardDate)),
+      "Day saved.",
+    );
+    setSavingBoard(false);
+  };
+
   return (
-    <div style={S.page}>
-      {/* status strip */}
-      <div style={S.strip}>
-        <strong style={{ fontSize: "1.1rem" }}>VA rail — {vaName}</strong>
-        <span style={{ ...S.badge, background: status.waiting > 0 ? "#c0392b" : "#2c3e50" }}>
-          {status.waiting} waiting
-        </span>
-        <button
-          onClick={toggleAvailable}
-          style={{ ...S.bigBtn, marginLeft: "auto", background: status.available ? "#27ae60" : "#c0392b" }}
-        >
-          {status.available ? "AVAILABLE" : "BUSY"}
-        </button>
-      </div>
-
-      {flash && (
-        <div style={S.flash} onClick={() => setFlash(null)}>
-          ⚠ {flash} (tap to dismiss)
+    <AppShell
+      title="Rail"
+      userName={vaName}
+      userRole="va"
+      live={connected}
+      right={
+        <div className="flex items-center gap-2">
+          {!soundOn && (
+            <Button size="sm" variant="secondary" icon={<Volume2 className="size-3.5" />} onClick={enableSound}>
+              Enable sound
+            </Button>
+          )}
+          {status.waiting > 0 && (
+            <Badge tone="danger" icon={<BellRing className="size-3" />}>
+              {status.waiting} waiting
+            </Badge>
+          )}
+          <div className="flex rounded-lg border border-line overflow-hidden">
+            <button
+              onClick={() => !status.available && toggleAvailable()}
+              className={`px-3 h-8 text-body-sm font-medium transition-colors duration-120
+                ${status.available ? "bg-success-soft text-success" : "text-ink-3 hover:bg-surface-2"}`}
+            >
+              Available
+            </button>
+            <button
+              onClick={() => status.available && toggleAvailable()}
+              className={`px-3 h-8 text-body-sm font-medium transition-colors duration-120
+                ${!status.available ? "bg-danger-soft text-danger" : "text-ink-3 hover:bg-surface-2"}`}
+            >
+              Busy
+            </button>
+          </div>
         </div>
-      )}
-
-      <div style={S.columns}>
-        {/* the rail */}
-        <section style={S.rail}>
-          <h2 style={S.h2}>Requests</h2>
-          {tasks.length === 0 && <p style={{ opacity: 0.5 }}>No open requests. They will ding in.</p>}
-          {tasks.map((t) => (
-            <Card key={t.id} task={t} onAnswer={answer} onConfirm={confirm} onReopen={reopen} />
-          ))}
+      }
+    >
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px] items-start">
+        {/* ------------- the rail ------------- */}
+        <section aria-label="Requests" className="grid gap-3 max-w-[720px]">
+          <AnimatePresence initial={false}>
+            {tasks.length === 0 && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                <div className="bg-surface border border-line rounded-xl">
+                  <EmptyState
+                    icon={<Inbox />}
+                    title="No open requests"
+                    hint="New requests from the AI will slide in here with a ding."
+                  />
+                </div>
+              </motion.div>
+            )}
+            {tasks.map((t) => (
+              <RailCard
+                key={t.id}
+                task={t}
+                onAnswer={answer}
+                onConfirm={confirm}
+                onReopen={reopen}
+              />
+            ))}
+          </AnimatePresence>
         </section>
 
-        {/* the slot board */}
-        <section style={S.boardWrap}>
-          <h2 style={S.h2}>
-            Slot board{" "}
+        {/* ------------- slot board ------------- */}
+        <aside className="bg-surface border border-line rounded-xl p-4 lg:sticky lg:top-16">
+          <div className="flex items-center gap-2 mb-3">
+            <h2 className="text-h3 font-semibold">Slot board</h2>
             <input
               type="date"
               value={boardDate}
               onChange={(e) => setBoardDate(e.target.value)}
-              style={S.dateInput}
+              className="ml-auto h-8 px-2 rounded-lg bg-surface border border-line text-body-sm
+                focus:border-accent focus:outline-none"
+              aria-label="Board date"
             />
-            {board && !board.loaded && <span style={{ ...S.badge, background: "#e67e22" }}>not loaded</span>}
-          </h2>
+            {board && !board.loaded && <Badge tone="warning">not loaded</Badge>}
+          </div>
+
           {board &&
             (["morning", "afternoon", "evening"] as const).map((block) => {
               const slots = board.slots.filter((s) => s.block === block);
               if (slots.length === 0) return null;
               return (
-                <div key={block} style={{ marginBottom: "0.75rem" }}>
-                  <div style={{ opacity: 0.6, marginBottom: "0.3rem", textTransform: "capitalize" }}>{block}</div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
-                    {slots.map((s) => {
-                      const picked = boardPick.has(s.time);
-                      return (
-                        <button
-                          key={s.time}
-                          onClick={() =>
-                            setBoardPick((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(s.time)) next.delete(s.time);
-                              else next.add(s.time);
-                              return next;
-                            })
-                          }
-                          style={{
-                            ...S.chip,
-                            background: picked ? "#27ae60" : "#3b4252",
-                            outline: s.state === "taken" && picked ? "2px solid #e67e22" : "none",
-                          }}
-                          title={s.state ? `currently ${s.state} (${s.source})` : "not loaded"}
-                        >
-                          {s.time}
-                        </button>
-                      );
-                    })}
+                <div key={block} className="mb-3">
+                  <p className="overline mb-1.5">{block}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {slots.map((s) => (
+                      <SlotChip
+                        key={s.time}
+                        time={s.time}
+                        picked={boardPick.has(s.time)}
+                        onToggle={() =>
+                          setBoardPick((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(s.time)) next.delete(s.time);
+                            else next.add(s.time);
+                            return next;
+                          })
+                        }
+                      />
+                    ))}
                   </div>
                 </div>
               );
             })}
-          <button onClick={saveBoard} style={{ ...S.bigBtn, background: "#2980b9", width: "100%" }}>
-            SAVE DAY (green = open)
-          </button>
-          <p style={{ opacity: 0.5, fontSize: "0.85rem" }}>
-            Morning load & midday re-check: tap what is genuinely open in Rev, then save.
+
+          <Button variant="primary" size="lg" className="w-full mt-1" loading={savingBoard} onClick={saveBoard}>
+            Save day
+          </Button>
+          <p className="text-caption text-ink-3 mt-2 leading-relaxed">
+            Morning load & midday re-check: tap what is genuinely open in Rev
+            (filled = open), then save.
           </p>
-        </section>
+        </aside>
       </div>
-    </div>
+    </AppShell>
   );
 }
 
 // ---------------------------------------------------------------------------
-// One rail card
-// ---------------------------------------------------------------------------
 
-function Card({
+function SlotChip({
+  time,
+  picked,
+  onToggle,
+  size = "md",
+}: {
+  time: string;
+  picked: boolean;
+  onToggle: () => void;
+  size?: "md" | "sm";
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      aria-pressed={picked}
+      className={`rounded-lg font-medium tnum transition-all duration-120 active:scale-95 border
+        ${size === "md" ? "h-10 px-3 text-body" : "h-8 px-2.5 text-body-sm"}
+        ${picked
+          ? "bg-accent text-on-accent border-transparent"
+          : "bg-surface text-ink-2 border-line hover:border-ink-3"}`}
+    >
+      {time}
+    </button>
+  );
+}
+
+function AgeTimer({ createdAt, state }: { createdAt: string; state: string }) {
+  const age = Math.floor((Date.now() - new Date(createdAt).getTime()) / 1000);
+  const urgent = age > 30 && (state === "waiting" || state === "reopened");
+  const label = age < 60 ? `${age}s` : `${Math.floor(age / 60)}m ${age % 60}s`;
+  return (
+    <span className={`ml-auto text-body-sm tnum ${urgent ? "text-danger font-medium" : "text-ink-3"}`}>
+      {label}
+    </span>
+  );
+}
+
+function RailCard({
   task,
   onAnswer,
   onConfirm,
   onReopen,
 }: {
   task: TaskCard;
-  onAnswer: (id: string, response: Record<string, unknown>) => void;
+  onAnswer: (id: string, response: Record<string, unknown>, okMsg?: string) => void;
   onConfirm: (id: string) => void;
   onReopen: (id: string, close: boolean) => void;
 }) {
+  const meta = TYPE_META[task.type];
   const p = task.payload;
   const age = Math.floor((Date.now() - new Date(task.createdAt).getTime()) / 1000);
   const urgent = age > 30 && (task.state === "waiting" || task.state === "reopened");
+  const timedOut = task.state === "timed_out";
 
   return (
-    <div style={{ ...S.card, borderColor: urgent ? "#c0392b" : "#3b4252" }}>
-      <div style={{ display: "flex", gap: "0.5rem", alignItems: "baseline" }}>
-        <strong style={{ textTransform: "uppercase" }}>{task.type}</strong>
-        <span style={{ ...S.badge, background: "#3b4252" }}>{task.state}</span>
-        <span style={{ marginLeft: "auto", color: urgent ? "#e74c3c" : "#888" }}>{age}s</span>
-      </div>
+    <motion.article
+      layout
+      initial={{ opacity: 0, y: -16, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, height: 0, marginBottom: -12, overflow: "hidden" }}
+      transition={{ type: "spring", stiffness: 420, damping: 34 }}
+      className={`relative bg-surface border border-line rounded-xl shadow-sm pl-4 pr-4 py-3.5
+        ${timedOut ? "opacity-70" : ""} ${urgent ? "pulse-urgent border-danger/40" : ""}`}
+    >
+      <span className={`absolute left-0 top-3 bottom-3 w-[3px] rounded-full ${meta.edge}`} aria-hidden />
+      <header className="flex items-center gap-2 mb-2">
+        <span className="text-ink-2">{meta.icon}</span>
+        <span className="overline">{meta.label}</span>
+        <Badge tone={timedOut ? "warning" : task.state === "waiting" || task.state === "reopened" ? "accent" : "neutral"}>
+          {task.state.replace("_", " ")}
+        </Badge>
+        <AgeTimer createdAt={task.createdAt} state={task.state} />
+      </header>
 
-      {task.state === "timed_out" ? (
-        <div style={S.row}>
-          <button style={{ ...S.bigBtn, background: "#2980b9" }} onClick={() => onReopen(task.id, false)}>
-            REOPEN
-          </button>
-          <button style={{ ...S.bigBtn, background: "#7f8c8d" }} onClick={() => onReopen(task.id, true)}>
-            CLOSE
-          </button>
+      {timedOut ? (
+        <div className="flex gap-2">
+          <Button variant="primary" size="lg" className="flex-1" onClick={() => onReopen(task.id, false)}>
+            Reopen
+          </Button>
+          <Button variant="secondary" size="lg" className="flex-1" onClick={() => onReopen(task.id, true)}>
+            Close
+          </Button>
         </div>
       ) : task.type === "availability" ? (
         <AvailabilityBody task={task} onAnswer={onAnswer} />
       ) : task.type === "book" ? (
         <>
-          <p style={S.line}>
-            Book <b>{String(p.time)}</b> on <b>{String(p.date)}</b> — {String(p.patientName)} (DOB{" "}
-            {String(p.patientDob)}){p.newPatient ? " — NEW PATIENT" : ""}
-            {p.note ? ` — ${String(p.note)}` : ""}
+          <p className="text-body leading-6 mb-3">
+            Book <b className="font-semibold tnum">{String(p.time)}</b> on{" "}
+            <b className="font-semibold tnum">{String(p.date)}</b> —{" "}
+            <span className="text-h3 font-semibold">{String(p.patientName)}</span>{" "}
+            <span className="text-ink-2">(DOB {String(p.patientDob)})</span>
+            {!!p.newPatient && <Badge tone="violet" className="ml-1.5">new patient</Badge>}
+            {!!p.note && <span className="block text-body-sm text-ink-2 mt-0.5">{String(p.note)}</span>}
           </p>
-          <div style={S.row}>
-            <button style={{ ...S.bigBtn, background: "#27ae60" }} onClick={() => onConfirm(task.id)}>
-              CONFIRM (booked in Rev)
-            </button>
-            <button style={{ ...S.bigBtn, background: "#c0392b" }} onClick={() => onAnswer(task.id, { slotGone: true })}>
-              SLOT GONE
-            </button>
+          <div className="flex gap-2">
+            <Button variant="success" size="lg" className="flex-[2]" onClick={() => onConfirm(task.id)}>
+              Confirm — booked in Rev
+            </Button>
+            <Button variant="danger" size="lg" className="flex-1" onClick={() => onAnswer(task.id, { slotGone: true }, "Marked slot gone — AI will re-offer.")}>
+              Slot gone
+            </Button>
           </div>
         </>
       ) : task.type === "find" ? (
         <FindBody task={task} onAnswer={onAnswer} />
       ) : task.type === "cancel" ? (
         <>
-          <p style={S.line}>
-            Cancel <b>{String(p.time)}</b> on <b>{String(p.date)}</b> — {String(p.patientName)}
+          <p className="text-body leading-6 mb-3">
+            Cancel <b className="font-semibold tnum">{String(p.time)}</b> on{" "}
+            <b className="font-semibold tnum">{String(p.date)}</b> —{" "}
+            <span className="text-h3 font-semibold">{String(p.patientName)}</span>
           </p>
-          <button style={{ ...S.bigBtn, background: "#c0392b", width: "100%" }} onClick={() => onConfirm(task.id)}>
-            CONFIRM (cancelled in Rev)
-          </button>
+          <Button variant="danger" size="lg" className="w-full" onClick={() => onConfirm(task.id)}>
+            Confirm — cancelled in Rev
+          </Button>
         </>
       ) : task.type === "move" ? (
         <>
-          <p style={S.line}>
-            Move {String(p.patientName)}: <b>{String(p.oldDate)} {String(p.oldTime)}</b> →{" "}
-            <b>{String(p.newDate)} {String(p.newTime)}</b>
+          <p className="text-body leading-6 mb-3">
+            Move <span className="text-h3 font-semibold">{String(p.patientName)}</span>:{" "}
+            <b className="font-semibold tnum">{String(p.oldDate)} {String(p.oldTime)}</b>
+            <span className="text-ink-3 mx-1.5">→</span>
+            <b className="font-semibold tnum">{String(p.newDate)} {String(p.newTime)}</b>
           </p>
-          <button style={{ ...S.bigBtn, background: "#8e44ad", width: "100%" }} onClick={() => onConfirm(task.id)}>
-            CONFIRM BOTH (moved in Rev)
-          </button>
+          <Button variant="primary" size="lg" className="w-full" onClick={() => onConfirm(task.id)}>
+            Confirm both — moved in Rev
+          </Button>
         </>
       ) : (
         <>
-          <p style={S.line}>
-            Call back <b>{String(p.phone)}</b>
-            {p.note ? ` — ${String(p.note)}` : ""}
+          <p className="text-body leading-6 mb-3">
+            Call back <b className="font-semibold tnum">{String(p.phone)}</b>
+            {!!p.note && <span className="block text-body-sm text-ink-2 mt-0.5">{String(p.note)}</span>}
           </p>
-          <button style={{ ...S.bigBtn, background: "#27ae60", width: "100%" }} onClick={() => onAnswer(task.id, { handled: true })}>
-            HANDLED
-          </button>
+          <Button variant="success" size="lg" className="w-full" onClick={() => onAnswer(task.id, { handled: true }, "Callback handled.")}>
+            Handled
+          </Button>
         </>
       )}
-    </div>
+    </motion.article>
   );
 }
 
-// Availability card: that day's chips from the board endpoint (Rule 1 —
-// buttons are drawn from the template, never typed).
 function AvailabilityBody({
   task,
   onAnswer,
 }: {
   task: TaskCard;
-  onAnswer: (id: string, response: Record<string, unknown>) => void;
+  onAnswer: (id: string, response: Record<string, unknown>, okMsg?: string) => void;
 }) {
   const date = String(task.payload.date);
   const [slots, setSlots] = useState<BoardSlot[] | null>(null);
@@ -376,14 +515,17 @@ function AvailabilityBody({
 
   return (
     <>
-      <p style={S.line}>
-        What&apos;s open on <b>{date}</b>?
+      <p className="text-body leading-6 mb-2.5">
+        What&apos;s open on <b className="font-semibold tnum">{date}</b>? Tap the open slots, then send.
       </p>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.5rem" }}>
+      <div className="flex flex-wrap gap-1.5 mb-3">
         {(slots ?? []).map((s) => (
-          <button
+          <SlotChip
             key={s.time}
-            onClick={() =>
+            time={s.time}
+            size="sm"
+            picked={pick.has(s.time)}
+            onToggle={() =>
               setPick((prev) => {
                 const next = new Set(prev);
                 if (next.has(s.time)) next.delete(s.time);
@@ -391,34 +533,27 @@ function AvailabilityBody({
                 return next;
               })
             }
-            style={{ ...S.chip, background: pick.has(s.time) ? "#27ae60" : "#3b4252" }}
-          >
-            {s.time}
-          </button>
+          />
         ))}
       </div>
-      <div style={S.row}>
-        <button
-          style={{ ...S.bigBtn, background: "#27ae60" }}
-          onClick={() => onAnswer(task.id, { openSlots: [...pick] })}
-        >
-          SEND
-        </button>
-        <button style={{ ...S.bigBtn, background: "#c0392b" }} onClick={() => onAnswer(task.id, { fullyBooked: true })}>
-          FULLY BOOKED
-        </button>
+      <div className="flex gap-2">
+        <Button variant="success" size="lg" className="flex-[2]" onClick={() => onAnswer(task.id, { openSlots: [...pick] }, "Sent to the AI.")}>
+          Send
+        </Button>
+        <Button variant="danger" size="lg" className="flex-1" onClick={() => onAnswer(task.id, { fullyBooked: true }, "Sent: fully booked.")}>
+          Fully booked
+        </Button>
       </div>
     </>
   );
 }
 
-// Find card: search our records, tap the right appointment (Rule 5/6 taps).
 function FindBody({
   task,
   onAnswer,
 }: {
   task: TaskCard;
-  onAnswer: (id: string, response: Record<string, unknown>) => void;
+  onAnswer: (id: string, response: Record<string, unknown>, okMsg?: string) => void;
 }) {
   const p = task.payload;
   const [found, setFound] = useState<FoundAppt[] | null>(null);
@@ -430,84 +565,41 @@ function FindBody({
 
   return (
     <>
-      <p style={S.line}>
-        Find ({String(p.intent)}): <b>{String(p.patientName)}</b>, DOB <b>{String(p.patientDob)}</b> — check Rev, then
-        tap the right one.
+      <p className="text-body leading-6 mb-2.5">
+        Find for <Badge tone="violet">{String(p.intent)}</Badge>:{" "}
+        <span className="text-h3 font-semibold">{String(p.patientName)}</span>{" "}
+        <span className="text-ink-2">(DOB {String(p.patientDob)})</span>
+        <span className="block text-body-sm text-ink-3 mt-0.5">
+          Check Rev, then tap the matching appointment.
+        </span>
       </p>
       {found === null ? (
-        <button style={{ ...S.bigBtn, background: "#2980b9", width: "100%" }} onClick={search}>
-          SHOW OUR RECORDS
-        </button>
+        <Button variant="primary" size="lg" className="w-full mb-2" onClick={search}>
+          Show our records
+        </Button>
       ) : (
-        <div style={{ display: "grid", gap: "0.4rem", marginBottom: "0.5rem" }}>
+        <div className="grid gap-1.5 mb-2.5">
           {found.map((a) => (
-            <button
+            <Button
               key={a.id}
-              style={{ ...S.bigBtn, background: "#2980b9", textAlign: "left" }}
-              onClick={() => onAnswer(task.id, { appointmentId: a.id })}
+              variant="secondary"
+              size="lg"
+              className="justify-start tnum"
+              onClick={() => onAnswer(task.id, { appointmentId: a.id }, "Appointment sent to the AI.")}
             >
-              {a.date} {a.time} — {a.type} ({a.status})
-            </button>
+              {a.date} {a.time} — {a.type} <Badge tone="neutral" className="ml-1.5">{a.status}</Badge>
+            </Button>
           ))}
-          {found.length === 0 && <p style={{ opacity: 0.6 }}>No records here — check Rev directly.</p>}
+          {found.length === 0 && (
+            <p className="text-body-sm text-ink-3 py-1">No records here — check Rev directly.</p>
+          )}
         </div>
       )}
-      <div style={S.row}>
-        <button style={{ ...S.smBtn }} onClick={() => onAnswer(task.id, { notFound: true })}>
-          NOT FOUND
-        </button>
-        <button style={{ ...S.smBtn }} onClick={() => onAnswer(task.id, { multipleMatches: true })}>
-          MULTIPLE MATCHES
-        </button>
-        <button style={{ ...S.smBtn }} onClick={() => onAnswer(task.id, { nothingActive: true })}>
-          NOTHING ACTIVE
-        </button>
+      <div className="flex flex-wrap gap-1.5">
+        <Button size="sm" onClick={() => onAnswer(task.id, { notFound: true }, "Sent: not found.")}>Not found</Button>
+        <Button size="sm" onClick={() => onAnswer(task.id, { multipleMatches: true }, "Sent: multiple matches.")}>Multiple matches</Button>
+        <Button size="sm" onClick={() => onAnswer(task.id, { nothingActive: true }, "Sent: nothing active.")}>Nothing active</Button>
       </div>
     </>
   );
 }
-
-// ---------------------------------------------------------------------------
-
-const S: Record<string, React.CSSProperties> = {
-  page: { minHeight: "100vh", background: "#1b1f2a", color: "#eceff4", padding: "1rem", fontSize: "1rem" },
-  strip: {
-    display: "flex",
-    gap: "0.75rem",
-    alignItems: "center",
-    background: "#232837",
-    padding: "0.6rem 1rem",
-    borderRadius: 10,
-    marginBottom: "1rem",
-  },
-  columns: { display: "grid", gridTemplateColumns: "1fr 380px", gap: "1rem", alignItems: "start" },
-  rail: { display: "grid", gap: "0.75rem", alignContent: "start" },
-  boardWrap: { background: "#232837", padding: "1rem", borderRadius: 10 },
-  h2: { margin: "0 0 0.75rem", fontSize: "1.05rem", display: "flex", gap: "0.5rem", alignItems: "center" },
-  card: { background: "#232837", border: "2px solid #3b4252", borderRadius: 10, padding: "0.9rem", display: "grid", gap: "0.5rem" },
-  line: { margin: 0, lineHeight: 1.5 },
-  row: { display: "flex", gap: "0.5rem", flexWrap: "wrap" },
-  bigBtn: {
-    border: "none",
-    color: "white",
-    padding: "0.8rem 1.1rem",
-    borderRadius: 8,
-    fontSize: "1rem",
-    fontWeight: 700,
-    cursor: "pointer",
-    flex: "1 1 auto",
-  },
-  smBtn: {
-    border: "1px solid #4c566a",
-    background: "#2e3440",
-    color: "#eceff4",
-    padding: "0.5rem 0.8rem",
-    borderRadius: 8,
-    cursor: "pointer",
-    flex: "1 1 auto",
-  },
-  chip: { border: "none", color: "white", padding: "0.55rem 0.8rem", borderRadius: 8, fontSize: "0.95rem", fontWeight: 600, cursor: "pointer" },
-  badge: { padding: "0.15rem 0.6rem", borderRadius: 999, fontSize: "0.8rem", color: "white" },
-  flash: { background: "#c0392b", color: "white", padding: "0.6rem 1rem", borderRadius: 8, marginBottom: "1rem", cursor: "pointer" },
-  dateInput: { background: "#2e3440", color: "#eceff4", border: "1px solid #4c566a", borderRadius: 6, padding: "0.25rem 0.5rem" },
-};
