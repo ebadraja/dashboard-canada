@@ -21,7 +21,7 @@ to the VA's rail. One language, one repo, one deploy, one bill.
 | Backend / API    | Next.js Route Handlers (`/api/*`) on a long-running Node server|
 | Database         | PostgreSQL (managed)                                          |
 | ORM / data layer | Prisma                                                        |
-| Auth & sessions  | Auth.js (NextAuth v5), credentials + database-backed sessions |
+| Auth & sessions  | Auth.js (NextAuth v5), credentials + short-lived JWT cookie, user re-read from DB every request |
 | Real-time push   | Server-Sent Events (SSE) over the authenticated session       |
 | Hosting          | One container on Railway / Render / Fly.io + managed Postgres |
 
@@ -53,12 +53,16 @@ nothing" guarantee.
 Typed models make the relationships explicit and safe, and its migration system
 keeps the schema versioned and reproducible across every future session.
 
-### Auth & sessions — Auth.js (NextAuth v5), credentials + DB sessions
+### Auth & sessions — Auth.js (NextAuth v5), credentials provider
 > *Requirement: "straightforward auth & sessions," every action tied to a real
 > person.*
-Mature, well-documented session auth with a credentials provider; sessions live
-in Postgres and expire, so no shared logins and every request carries a real
-user identity that the backend guard reads.
+Mature, well-documented auth with a credentials provider. **Session mechanics
+(amended during Doc 0 build):** Auth.js's credentials provider only supports
+JWT session cookies, not DB-stored sessions. So the cookie is a short-lived
+(8h) signed JWT carrying ONLY the user id — role, clinic, and active status
+are re-read from Postgres by the guard on **every request**. Nothing
+security-relevant is trusted from the cookie, and disabling a user locks them
+out on their next request (which is what DB sessions would have bought us).
 
 ### Role-based access + per-clinic isolation — enforced in the backend
 > *Requirement: "role-based access enforced server-side," strict clinic

@@ -1,10 +1,18 @@
-// Prisma schema — see STACK.md.
+// Prisma schema — the Doc 0 data model. See STACK.md for the stack decision.
 //
-// PLACEHOLDER ONLY. There are intentionally NO models here yet.
-// The data model (Clinic, User, SlotTemplate, AvailabilityEntry,
-// AppointmentRecord, Call, Task, Invoice, AuditLog) is the FOUNDATION slice
-// (Doc 0) and will be added there, one coherent migration, after the skeleton
-// is approved. Do not add feature models to the skeleton.
+// Nine entities from Doc 0 §2. Relationships in plain words:
+//   - A clinic has many users, slots, calls, invoices.
+//   - A call may create one appointment record and one or more tasks.
+//   - A task always belongs to the call it came from (and the VA who handled it).
+//   - An availability entry is "this clinic, this date, this time = open/taken/held".
+//   - Every important change writes an AuditLog row.
+//
+// Conventions:
+//   - Money is stored in integer cents (no floats).
+//   - Clock times ("10:30") are strings in 24h "HH:MM", interpreted in the
+//     clinic's timezone. Calendar dates use @db.Date.
+//   - Patient data is minimal by design: name + DOB only (Doc 0 / plan).
+//     The real medical record lives in RevolutionEHR.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,4 +21,299 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  va
+  doctor
+  operator
+}
+
+enum ClinicStatus {
+  setup // being configured, not answering calls
+  live // answering real calls
+  paused // temporarily disabled by the operator
+}
+
+enum SlotBlock {
+  morning
+  afternoon
+  evening
+}
+
+enum AvailabilityState {
+  open
+  taken
+  held
+}
+
+enum AvailabilitySource {
+  morning // VA's morning load
+  booking // flipped taken by a confirmed booking
+  cancel // reopened by a confirmed cancellation
+  reconcile // corrected during midday reconciliation
+}
+
+enum AppointmentStatus {
+  requested // AI asked, VA has not confirmed in Rev yet
+  confirmed // VA did it for real in Rev (Golden Rule 3)
+  cancelled
+  moved // superseded by a reschedule
+}
+
+enum CallType {
+  book
+  cancel
+  move
+  availability
+  callback // caller asked for / was promised a callback
+}
+
+enum CallOutcome {
+  completed // the caller got what they asked for
+  callback // VA busy/timeout -> callback promised (Golden Rule 4)
+  timed_out // task timed out and no callback was captured
+  abandoned // caller hung up before completion
+}
+
+enum TaskType {
+  availability // "what's open on <day>?"
+  book // "book <slot> for <patient>"
+  find // "find appointments for <patient>"
+  cancel // "cancel <appointment>"
+  move // "move <appointment>"
+  callback // "caller wants a callback"
+}
+
+// Doc 1 §3 state machine. The backend is the referee: only these states,
+// only along the allowed arrows (enforced in code, logged in AuditLog).
+//   waiting -> answered | timed_out
+//   answered -> confirmed | done
+//   confirmed -> done
+//   timed_out -> reopened | closed
+enum TaskState {
+  waiting
+  answered
+  confirmed
+  done
+  timed_out
+  reopened
+  closed
+}
+
+enum InvoiceStatus {
+  draft
+  sent
+  paid
+  overdue
+}
+
+// ---------------------------------------------------------------------------
+// Entities
+// ---------------------------------------------------------------------------
+
+model Clinic {
+  id       String       @id @default(cuid())
+  name     String
+  timezone String // IANA, e.g. "America/Toronto"
+  status   ClinicStatus @default(setup)
+
+  // Clinic hours as JSON: { mon: [["09:00","12:00"],["13:00","19:00"]], ... }
+  // Display/validation data only — bookable times come from SlotTemplate.
+  hours Json?
+
+  // Plan / price (revenue side; the doctor sees only this, never cost).
+  planName          String? // e.g. "Standard"
+  monthlyPriceCents Int? // e.g. 220000 = $2,200.00
+  currency          String  @default("CAD")
+
+  // The AI phone system authenticates as this clinic with this key (hashed).
+  apiKeyHash String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users        User[]
+  slotTemplate SlotTemplateEntry[]
+  availability AvailabilityEntry[]
+  appointments AppointmentRecord[]
+  calls        Call[]
+  tasks        Task[]
+  invoices     Invoice[]
+}
+
+model User {
+  id           String  @id @default(cuid())
+  name         String
+  email        String  @unique
+  passwordHash String
+  role         Role
+  active       Boolean @default(true) // operator can disable access (Doc 3)
+
+  // Operator has no clinic (Doc 0: "operator has none").
+  clinicId String?
+  clinic   Clinic? @relation(fields: [clinicId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  handledCalls Call[]     @relation("HandlingVA")
+  handledTasks Task[]     @relation("HandlingVA")
+  auditLogs    AuditLog[]
+
+  @@index([clinicId])
+}
+
+// The clinic's fixed daily menu (Doc 1 / plan §3): every slot the clinic
+// could ever offer, the same every day. One row per slot time.
+model SlotTemplateEntry {
+  id       String    @id @default(cuid())
+  clinicId String
+  clinic   Clinic    @relation(fields: [clinicId], references: [id])
+  block    SlotBlock
+  time     String // "HH:MM" 24h, e.g. "09:30"
+
+  @@unique([clinicId, time])
+  @@index([clinicId, block])
+}
+
+// "This clinic, this date, this time = open / taken / held."
+// The Morning List is simply all rows for (clinic, date).
+model AvailabilityEntry {
+  id       String             @id @default(cuid())
+  clinicId String
+  clinic   Clinic             @relation(fields: [clinicId], references: [id])
+  date     DateTime           @db.Date
+  time     String // "HH:MM", must exist in the clinic's SlotTemplate
+  state    AvailabilityState
+  source   AvailabilitySource
+
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@unique([clinicId, date, time])
+  @@index([clinicId, date])
+}
+
+// Minimal by design: name + DOB only. The real record lives in RevolutionEHR.
+model AppointmentRecord {
+  id       String @id @default(cuid())
+  clinicId String
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+
+  patientName String
+  patientDob  DateTime          @db.Date
+  date        DateTime          @db.Date
+  time        String // "HH:MM"
+  type        String // e.g. "eye exam" — free text from the call
+  status      AppointmentStatus @default(requested)
+
+  // "Created by a call" (Doc 0). Later calls may also change it (cancel/move).
+  createdByCallId String?
+  createdByCall   Call?   @relation("CreatedAppointment", fields: [createdByCallId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  changedByCalls Call[] @relation("ChangedAppointment")
+
+  @@index([clinicId, date])
+  @@index([clinicId, patientName, patientDob])
+}
+
+// One row per phone interaction. Doctor analytics (Doc 2) and billing usage
+// (Doc 3) are pure counts/averages over these rows — log them cleanly.
+model Call {
+  id       String @id @default(cuid())
+  clinicId String
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+
+  type            CallType
+  outcome         CallOutcome?
+  startedAt       DateTime     @default(now())
+  durationSeconds Int?
+
+  // The VA who handled it (null if fully answered from the Morning List).
+  vaUserId String?
+  vaUser   User?   @relation("HandlingVA", fields: [vaUserId], references: [id])
+
+  // "May change an appointment" (Doc 0): the appointment this call acted on.
+  appointmentId String?
+  appointment   AppointmentRecord? @relation("ChangedAppointment", fields: [appointmentId], references: [id])
+
+  createdAppointments AppointmentRecord[] @relation("CreatedAppointment")
+  tasks               Task[]
+
+  @@index([clinicId, startedAt])
+  @@index([vaUserId])
+}
+
+// A rail card. Always belongs to the call it came from; assigned to the VA
+// who handles it. State machine per Doc 1 §3 — transitions enforced in code.
+model Task {
+  id       String @id @default(cuid())
+  clinicId String // denormalized from call for fast isolation-scoped queries
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+  callId   String
+  call     Call   @relation(fields: [callId], references: [id])
+
+  type    TaskType
+  state   TaskState @default(waiting)
+  payload Json // e.g. { day, slot, patientName, patientDob, note }
+
+  // The VA who handled it (null while waiting, set on answer).
+  vaUserId String?
+  vaUser   User?   @relation("HandlingVA", fields: [vaUserId], references: [id])
+
+  // Timestamps drive Doc 2's "average response time" (answeredAt - createdAt).
+  createdAt   DateTime  @default(now())
+  answeredAt  DateTime?
+  confirmedAt DateTime?
+  closedAt    DateTime?
+
+  @@index([clinicId, state])
+  @@index([callId])
+}
+
+// Billing is derived, not typed (Doc 3): generated from plan + usage.
+model Invoice {
+  id       String @id @default(cuid())
+  clinicId String
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+
+  periodStart DateTime      @db.Date
+  periodEnd   DateTime      @db.Date
+  lineItems   Json // [{ label, amountCents }, ...] derived from plan + usage
+  amountCents Int
+  currency    String        @default("CAD")
+  status      InvoiceStatus @default(draft)
+
+  sentAt    DateTime?
+  paidAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([clinicId, periodStart])
+}
+
+// Who did what, when, on which record. Polymorphic reference by (entityType,
+// entityId). userId is null for system/AI-initiated changes.
+model AuditLog {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  action     String // e.g. "task.answered", "appointment.confirmed", "clinic.created"
+  entityType String // e.g. "Task", "AppointmentRecord", "Clinic"
+  entityId   String
+  meta       Json? // before/after or extra context
+
+  createdAt DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([userId, createdAt])
 }
