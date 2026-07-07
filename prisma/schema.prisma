@@ -1,0 +1,16 @@
+// Prisma schema — see STACK.md.
+//
+// PLACEHOLDER ONLY. There are intentionally NO models here yet.
+// The data model (Clinic, User, SlotTemplate, AvailabilityEntry,
+// AppointmentRecord, Call, Task, Invoice, AuditLog) is the FOUNDATION slice
+// (Doc 0) and will be added there, one coherent migration, after the skeleton
+// is approved. Do not add feature models to the skeleton.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
