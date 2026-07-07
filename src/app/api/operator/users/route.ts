@@ -20,6 +20,28 @@ const createUserSchema = z
     message: "operator has no clinic (Doc 0)",
   });
 
+// Operator-only: list all users across clinics (Doc 3 §2).
+export async function GET() {
+  try {
+    await requireUser(["operator"]);
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        active: true,
+        clinicId: true,
+        clinic: { select: { name: true } },
+      },
+      orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+    });
+    return NextResponse.json(users);
+  } catch (e) {
+    return guardResponse(e);
+  }
+}
+
 // Operator-only: create VA / doctor / operator logins (Doc 3 §2).
 export async function POST(req: Request) {
   try {

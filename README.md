@@ -5,10 +5,14 @@ answers the phone; a human VA does the real bookings inside RevolutionEHR; they
 pass short notes through a fast "rail" dashboard. See `docs/` for the full plan
 and `STACK.md` for the fixed technology decision.
 
-> **Status: empty skeleton.** It starts and serves a blank page + a health
-> check. No features are built yet. Building order is strict:
-> **Foundation (Doc 0) → VA view (Doc 1) → Doctor view (Doc 2) → Operator view (Doc 3)**,
-> one slice at a time, each gated by its Definition of Done.
+> **Status: all four slices built and verified** —
+> **Foundation (Doc 0) ✓ → VA view (Doc 1) ✓ → Doctor view (Doc 2) ✓ → Operator view (Doc 3) ✓** —
+> each against its document's Definition of Done. Core product complete for
+> one clinic; onboarding the next clinic is a form in the operator view.
+>
+> Screens: `/login` · `/va` (the rail) · `/doctor` (report card) · `/operator`
+> (control room). The AI phone system talks to `/api/ai/*` with a per-clinic
+> Bearer key.
 
 ## Stack (see `STACK.md`)
 

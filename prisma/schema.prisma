@@ -144,6 +144,7 @@ model Clinic {
   calls        Call[]
   tasks        Task[]
   invoices     Invoice[]
+  costs        CostEntry[]
 }
 
 model User {
@@ -298,6 +299,25 @@ model Invoice {
   updatedAt DateTime  @updatedAt
 
   @@index([clinicId, periodStart])
+}
+
+// The cost side of money (Doc 3 §3.2): VA pay, AI/voice usage, messaging,
+// hosting — per clinic, per month. ONLY the operator can ever read this;
+// margin = plan revenue - sum(costs). Added during the Doc 3 build (Doc 0's
+// nine entities had no cost table, but Doc 3 requires margin per clinic).
+model CostEntry {
+  id       String @id @default(cuid())
+  clinicId String
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+
+  month       String // "YYYY-MM"
+  label       String // e.g. "VA pay", "AI voice minutes", "hosting share"
+  amountCents Int
+  currency    String @default("CAD")
+
+  createdAt DateTime @default(now())
+
+  @@index([clinicId, month])
 }
 
 // Who did what, when, on which record. Polymorphic reference by (entityType,
